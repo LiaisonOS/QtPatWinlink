@@ -70,7 +70,12 @@ void PatClient::deleteMessage(const QString &box, const QString &mid)
 
 void PatClient::markRead(const QString &box, const QString &mid)
 {
-    auto *reply = post("/api/mailbox/" + box + "/" + mid + "/read");
+    // Pat expects JSON body {"Read": true} and a content-type header — an
+    // empty POST returns 400 and the read state never changes.
+    QNetworkRequest req(QUrl(m_baseUrl + "/api/mailbox/" + box + "/" + mid + "/read"));
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    QByteArray body = "{\"Read\":true}";
+    auto *reply = m_nam->post(req, body);
     handleReply(reply, [](const QByteArray &) {});
 }
 

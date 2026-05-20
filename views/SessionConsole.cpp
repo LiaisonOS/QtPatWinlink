@@ -10,6 +10,8 @@
 #include <QHBoxLayout>
 #include <QDateTime>
 #include <QJsonObject>
+#include <QScrollBar>
+#include <QCloseEvent>
 
 SessionConsole::SessionConsole(PatClient *client, bool touchMode, QWidget *parent)
     : QDialog(parent)
@@ -64,6 +66,10 @@ SessionConsole::SessionConsole(PatClient *client, bool touchMode, QWidget *paren
     // ── Buttons ────────────────────────────────────────────────────────────────
     m_disconnectBtn = new QPushButton("Disconnect");
     m_closeBtn      = new QPushButton("Close");
+    // Start with both disabled — Disconnect/Abort becomes available only
+    // once Pat reports we are dialing or connected. Close becomes available
+    // once the session has truly ended.
+    m_disconnectBtn->setEnabled(false);
     m_closeBtn->setEnabled(false);
 
     if (touchMode) {
@@ -87,6 +93,16 @@ SessionConsole::SessionConsole(PatClient *client, bool touchMode, QWidget *paren
     layout->addWidget(m_progressBar);
     layout->addWidget(m_console);
     layout->addLayout(btnRow);
+
+    // Debounce timer for "session ended" — Pat sends transient dialing=false
+    // status events between retry attempts, and we used to treat those as
+    // session-ended (disabling the button mid-retry). Now we only declare
+    // session-ended after a few seconds of no dialing AND no connection.
+    m_endedDebounce = new QTimer(this);
+    m_endedDebounce->setSingleShot(true);
+    m_endedDebounce->setInterval(3000);
+    QObject::connect(m_endedDebounce, &QTimer::timeout,
+                     this, &SessionConsole::onSessionTrulyEnded);
 
     QObject::connect(m_disconnectBtn, &QPushButton::clicked, this, &SessionConsole::onDisconnectClicked);
     QObject::connect(m_closeBtn,      &QPushButton::clicked, this, &QWidget::close);
@@ -139,7 +155,10 @@ void SessionConsole::appendLog(const QString &line)
         m_lastLine = line;
         m_repeatCount = 0;
     }
-    m_console->ensureCursorVisible();
+    // Force scroll to the bottom so the latest entry is always visible
+    m_console->moveCursor(QTextCursor::End);
+    QScrollBar *vbar = m_console->verticalScrollBar();
+    vbar->setValue(vbar->maximum());
 }
 
 void SessionConsole::updateProgress(const QJsonObject &p)
@@ -176,27 +195,83 @@ void SessionConsole::updateStatus(const QJsonObject &status)
     QString remote = status.value("remote_addr").toString();
 
     if (dialing) {
+        // Active retry — cancel any pending "session ended" debounce.
+        if (m_endedDebounce) m_endedDebounce->stop();
         m_statusLabel->setText("Dialing " + remote + "...");
         m_statusLabel->setStyleSheet("color: #fcc419; font-size: 11pt; font-weight: bold;");
+        // During dialing the gentle /api/disconnect is unreliable (Pat
+        // queues it, modem ignores until current retry finishes). Show
+        // "Abort" so the operator knows clicking it stops the mode hard.
+        m_disconnectBtn->setText("Abort");
+        m_disconnectBtn->setEnabled(true);
+        m_closeBtn->setEnabled(false);
     } else if (connected) {
+        // Established — cancel any pending "session ended" debounce.
+        if (m_endedDebounce) m_endedDebounce->stop();
         m_statusLabel->setText("Connected — " + remote);
         m_statusLabel->setStyleSheet("color: #51cf66; font-size: 11pt; font-weight: bold;");
         m_connected = true;
+        m_disconnectBtn->setText("Disconnect");
+        m_disconnectBtn->setEnabled(true);
+        m_closeBtn->setEnabled(false);
     } else {
-        m_statusLabel->setText("Session ended");
-        m_statusLabel->setStyleSheet("color: #aaaaaa; font-size: 11pt; font-weight: bold;");
-        m_disconnectBtn->setEnabled(false);
-        m_closeBtn->setEnabled(true);
-        m_progressBar->hide();
-        appendLog("--- Session ended ---");
-        m_connected = false;
-        emit sessionDone();
+        // Both flags false: could be a brief gap between retries OR an
+        // actual session end. Debounce — only declare ended after a few
+        // sustained seconds of inactivity.
+        if (m_endedDebounce && !m_endedDebounce->isActive() && !m_sessionEnded) {
+            m_endedDebounce->start();
+        }
     }
+}
+
+void SessionConsole::onSessionTrulyEnded()
+{
+    if (m_sessionEnded) return;
+    m_sessionEnded = true;
+
+    bool wasConnected = m_connected;
+    m_statusLabel->setText("Session ended");
+    m_statusLabel->setStyleSheet("color: #aaaaaa; font-size: 11pt; font-weight: bold;");
+    m_disconnectBtn->setEnabled(false);
+    m_closeBtn->setEnabled(true);
+    m_progressBar->hide();
+    appendLog("--- Session ended ---");
+    m_connected = false;
+    emit sessionDone(wasConnected);
 }
 
 void SessionConsole::onDisconnectClicked()
 {
-    appendLog("Disconnecting...");
+    // Abort (dialing) and Disconnect (connected) both end ONLY the current
+    // connection attempt — they do NOT stop the mode. pat-http and the modem
+    // keep running so the operator can pick another station and try again.
+    //
+    // VARA HF / Mercury sometimes ignore the very first /api/disconnect
+    // because it arrives mid-handshake. Sending again ~2s later catches the
+    // next opportunity and reliably ends the retry loop.
+    bool isAbort = !m_connected;
+    appendLog(isAbort ? "Aborting connection attempt..." : "Disconnecting...");
     m_disconnectBtn->setEnabled(false);
+
     m_client->disconnect();
+    QTimer::singleShot(2000, this, [this]() {
+        if (!m_sessionEnded) m_client->disconnect();
+    });
+    QTimer::singleShot(5000, this, [this]() {
+        if (!m_sessionEnded) m_client->disconnect();
+    });
+}
+
+void SessionConsole::closeEvent(QCloseEvent *event)
+{
+    // If the user closes the dialog (X / Esc / window manager) while a
+    // session is still in progress, treat it as a graceful disconnect.
+    // Pat keeps processing the disconnect in the background; the mode
+    // (pat-http + modem) stays running so the operator can pick another
+    // station and try again.
+    if (!m_sessionEnded) {
+        appendLog("Window closed — sending disconnect to Pat...");
+        m_client->disconnect();
+    }
+    QDialog::closeEvent(event);
 }

@@ -26,7 +26,8 @@ SOURCES += \
     views/MessageDialog.cpp \
     views/SessionConsole.cpp \
     views/FormPickerDialog.cpp \
-    views/FormRenderDialog.cpp
+    views/FormRenderDialog.cpp \
+    views/PositionReportDialog.cpp
 
 HEADERS += \
     MainWindow.h \
@@ -44,4 +45,5 @@ HEADERS += \
     views/SessionConsole.h \
     views/LongPressFilter.h \
     views/FormPickerDialog.h \
-    views/FormRenderDialog.h
+    views/FormRenderDialog.h \
+    views/PositionReportDialog.h

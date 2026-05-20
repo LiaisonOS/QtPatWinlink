@@ -20,6 +20,7 @@ signals:
     void connectRequested();
     void positionRequested();
     void formsUpdateRequested();
+    void openInBrowserRequested();
     void aboutRequested();
     void closeRequested();
 };

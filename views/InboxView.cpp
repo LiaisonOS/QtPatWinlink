@@ -117,14 +117,18 @@ void InboxView::onRowDoubleClicked(int row, int)
 
     auto *conn = new QMetaObject::Connection;
     *conn = QObject::connect(m_client, &PatClient::messageReady,
-        this, [this, conn](const QString &box, const QString &, const QJsonObject &full) {
+        this, [this, conn, mid](const QString &box, const QString &, const QJsonObject &full) {
             if (box != "in") return;
             QObject::disconnect(*conn);
             delete conn;
+            // Mark the message as read in Pat — user is viewing it now.
+            m_client->markRead("in", mid);
             MessageDialog dlg(full, "in", m_client, m_touchMode, this);
             QObject::connect(&dlg, &MessageDialog::composeRequested, this, &InboxView::composeRequested);
             QObject::connect(&dlg, &MessageDialog::deleted, this, &InboxView::refresh);
             dlg.exec();
+            // Refresh so the bold styling reflects the new read state.
+            refresh();
         });
 
     m_client->fetchMessage("in", mid);

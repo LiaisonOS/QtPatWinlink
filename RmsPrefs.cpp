@@ -15,7 +15,7 @@
 RmsPrefs::RmsPrefs()
 {
     QString base = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
-    m_path = base + "/emcomm-tools/qtpatwinlink/qtpatwinlink.json";
+    m_path = base + "/liaisonos/qtpatwinlink/qtpatwinlink.json";
     load();
 }
 

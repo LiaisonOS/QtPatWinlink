@@ -13,14 +13,23 @@
 #include <QTimer>
 #include <QMessageBox>
 #include <QStatusBar>
+#include <QLocalSocket>
+#include <QJsonDocument>
+#include <QProcess>
+#include <QUrl>
+#include <QUrlQuery>
+#include <unistd.h>
 #include "views/FormPickerDialog.h"
 #include "views/FormRenderDialog.h"
+#include "views/PositionReportDialog.h"
 
 MainWindow::MainWindow(const QString &patUrl, bool touchMode,
                        const QString &band, const QString &modem, QWidget *parent)
     : QMainWindow(parent)
     , m_client(new PatClient(patUrl, this))
     , m_touchMode(touchMode)
+    , m_band(band)
+    , m_modem(modem)
 {
     setWindowTitle("Pat Winlink — LiaisonOS");
 
@@ -48,6 +57,17 @@ MainWindow::MainWindow(const QString &patUrl, bool touchMode,
     QObject::connect(m_actionMenu, &ActionMenu::composeRequested, this, [this]() { showCompose(); });
     QObject::connect(m_actionMenu, &ActionMenu::connectRequested, this, &MainWindow::showConnect);
     QObject::connect(m_actionMenu, &ActionMenu::closeRequested,   this, &QWidget::close);
+    QObject::connect(m_actionMenu, &ActionMenu::openInBrowserRequested,
+                     this, &MainWindow::handoffToBrowser);
+    QObject::connect(m_actionMenu, &ActionMenu::positionRequested, this, [this]() {
+        auto *dlg = new PositionReportDialog(m_client, m_touchMode, this);
+        dlg->setAttribute(Qt::WA_DeleteOnClose);
+        QObject::connect(dlg, &PositionReportDialog::sent, this, [this]() {
+            setStatusActivity("●  Position report queued to outbox");
+            QTimer::singleShot(3000, this, [this]() { setStatusIdle("●  Idle"); });
+        });
+        dlg->show();
+    });
     QObject::connect(m_actionMenu, &ActionMenu::formsUpdateRequested, this, [this]() {
         setStatusActivity("●  Updating form templates...");
         m_client->updateFormTemplates();
@@ -70,6 +90,12 @@ MainWindow::MainWindow(const QString &patUrl, bool touchMode,
     // Compose done → back to inbox
     QObject::connect(m_compose, &ComposeView::done, this, &MainWindow::showInbox);
     QObject::connect(m_connect, &ConnectView::done, this, &MainWindow::showInbox);
+
+    // Whenever a message gets posted, refresh the outbox so it's current
+    // whenever the user navigates there.
+    QObject::connect(m_client, &PatClient::messagePosted, this, [this]() {
+        m_outbox->refresh();
+    });
 
     // "Use Template" → open form picker → render dialog → fetch submitted data → prefill composer
     QObject::connect(m_compose, &ComposeView::templateRequested, this, [this]() {
@@ -310,4 +336,84 @@ void MainWindow::onWsEvent(const QJsonObject &event)
         if (current == m_sent)    m_sent->refresh();
         if (current == m_archive) m_archive->refresh();
     }
+}
+
+// ── Safety-net: hand off to the Min web browser ──────────────────────────────
+// Action menu → Open in Browser. Confirms, tells et-supervisor not to cascade
+// when QtPatWinlink exits, launches the browser at Pat's web UI, then closes
+// this app. The mode (pat-http + modem) keeps running.
+
+void MainWindow::handoffToBrowser()
+{
+    auto reply = QMessageBox::question(this,
+        "Open in Browser",
+        "Switch from QtPatWinlink to the Pat web UI in your browser?\n\n"
+        "QtPatWinlink will close. The Winlink mode keeps running, and the "
+        "browser will connect to Pat at http://localhost:8080/ui.\n\n"
+        "Use this as a safety net if QtPatWinlink misbehaves.",
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (reply != QMessageBox::Yes) return;
+
+    // Build the URL with current mode/band so Pat opens the right view.
+    QUrl url(m_client->baseUrl() + "/ui");
+    QUrlQuery q;
+    if (!m_modem.isEmpty()) q.addQueryItem("mode", m_modem);
+    if (!m_band.isEmpty())  q.addQueryItem("band", m_band);
+    if (q.hasQueryItem("mode") || q.hasQueryItem("band")) url.setQuery(q);
+
+    // Tell the supervisor not to cascade when we exit.
+    if (!notifySupervisorIgnoreExit()) {
+        QMessageBox::warning(this, "Open in Browser",
+            "Could not reach et-supervisor.\n\n"
+            "Closing QtPatWinlink right now would also stop the Winlink mode. "
+            "Aborting the browser hand-off — use the dashboard's Stop button "
+            "if you want to end the mode.");
+        return;
+    }
+
+    // Launch the browser.
+    if (!launchBrowser(url.toString())) {
+        QMessageBox::critical(this, "Open in Browser",
+            "Could not launch any browser. Aborting.");
+        // We've already set ignore_exit on the supervisor side, but staying
+        // open is fine — ignore_exit only kicks in on our NEXT exit.
+        return;
+    }
+
+    // Give the browser a moment to map its window before we vanish.
+    QTimer::singleShot(500, this, &QWidget::close);
+}
+
+bool MainWindow::notifySupervisorIgnoreExit()
+{
+    const QString sockPath =
+        QString("/run/user/%1/et-supervisor.sock").arg(getuid());
+
+    QLocalSocket sock;
+    sock.connectToServer(sockPath);
+    if (!sock.waitForConnected(1500)) return false;
+
+    QJsonObject cmd;
+    cmd["cmd"]     = "ignore-exit";
+    cmd["process"] = "qtpatwinlink";
+    sock.write(QJsonDocument(cmd).toJson(QJsonDocument::Compact) + "\n");
+    sock.waitForBytesWritten(1500);
+
+    // Best-effort read of the response — we don't strictly need it but
+    // waiting for ack ensures the supervisor has set the flag before we
+    // start the browser launch / exit sequence.
+    sock.waitForReadyRead(2000);
+    sock.disconnectFromServer();
+    return true;
+}
+
+bool MainWindow::launchBrowser(const QString &url)
+{
+    // Same priority chain as et-supervisor's _open_browser.
+    const QStringList browsers = {"min", "firefox-esr", "firefox", "xdg-open"};
+    for (const QString &b : browsers) {
+        if (QProcess::startDetached(b, {url})) return true;
+    }
+    return false;
 }

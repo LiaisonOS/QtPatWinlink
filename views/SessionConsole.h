@@ -12,6 +12,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QJsonObject>
+#include <QTimer>
 #include "../PatClient.h"
 
 class SessionConsole : public QDialog
@@ -25,10 +26,14 @@ public slots:
     void onWsEvent(const QJsonObject &event);
 
 signals:
-    void sessionDone();
+    void sessionDone(bool wasConnected);
+
+protected:
+    void closeEvent(QCloseEvent *event) override;
 
 private slots:
     void onDisconnectClicked();
+    void onSessionTrulyEnded();
 
 private:
     void appendLog(const QString &line);
@@ -46,6 +51,8 @@ private:
     QPushButton    *m_closeBtn;
 
     bool            m_connected = false;
+    bool            m_sessionEnded = false;
+    QTimer         *m_endedDebounce = nullptr;
     QString         m_lastLine;
     int             m_repeatCount = 0;
 };

@@ -54,17 +54,27 @@ ConnectView::ConnectView(PatClient *client, bool touchMode, QWidget *parent)
         "QPushButton:hover { background: #2a2a2a; }"
     ).arg(touchMode ? 6 : 4)
      .arg(touchMode ? "font-size: 16px; min-height: 58px; padding-left: 20px; padding-right: 20px;"
-                    : QString("font-size: %1pt; padding-left: 14px; padding-right: 14px;").arg(fontSize));
+                    : QString("font-size: %1pt; min-height: 30px; padding-left: 14px; padding-right: 14px;").arg(fontSize));
+
+    // Menu styling — light text on dark bg, orange highlight with BLACK text
+    // on hover. Without this, desktop mode falls back to Qt defaults which
+    // can render black-on-black on dark themes.
+    QString filterMenuStyle = touchMode ? touchStyle::menuStyle : QString(
+        "QMenu { background: #1e1e1e; color: #e0e0e0;"
+        "  border: 1px solid #404040; padding: 4px; }"
+        "QMenu::item { padding: 6px 18px; color: #e0e0e0; }"
+        "QMenu::item:selected { background: #ffa500; color: #000000; }"
+    );
 
     auto setBtnText = [](QPushButton *btn, const QString &label, const QString &value) {
         btn->setText(label + ": " + value + "    ▾");
     };
 
-    auto makeFilterMenu = [touchMode, setBtnText](QPushButton *btn, const QStringList &options,
-                                                  QString &valueRef, const QString &label,
-                                                  std::function<void()> onChange) {
+    auto makeFilterMenu = [filterMenuStyle, setBtnText](QPushButton *btn, const QStringList &options,
+                                                        QString &valueRef, const QString &label,
+                                                        std::function<void()> onChange) {
         auto *menu = new QMenu(btn);
-        if (touchMode) menu->setStyleSheet(touchStyle::menuStyle);
+        menu->setStyleSheet(filterMenuStyle);
         for (const QString &opt : options) {
             QAction *act = menu->addAction(opt);
             QObject::connect(act, &QAction::triggered, btn,
@@ -220,6 +230,14 @@ ConnectView::ConnectView(PatClient *client, bool touchMode, QWidget *parent)
         star->setForeground(QColor(isFav ? "#ffa500" : "#666666"));
     });
 
+    // Double-click any non-star cell = Connect to that station.
+    QObject::connect(m_table, &QTableWidget::cellDoubleClicked, this,
+        [this](int row, int col) {
+            if (col == 5) return;   // star column has its own click handler
+            m_table->setCurrentCell(row, 0);
+            onConnectClicked();
+        });
+
     if (touchMode) {
         m_table->setSelectionMode(QAbstractItemView::SingleSelection);
         QScroller::grabGesture(m_table->viewport(), QScroller::LeftMouseButtonGesture);
@@ -373,9 +391,18 @@ void ConnectView::onConnectClicked()
     // Open session console — it subscribes to WS events and shows live protocol exchange
     auto *console = new SessionConsole(m_client, m_touchMode, this->parentWidget());
     console->setAttribute(Qt::WA_DeleteOnClose);
-    QObject::connect(console, &SessionConsole::sessionDone, this, [this]() {
+    QObject::connect(console, &SessionConsole::sessionDone, this,
+        [this](bool wasConnected) {
+            m_connectBtn->setEnabled(true);
+            // Only navigate away (to Inbox) if a connection was actually
+            // established. On failed connects, stay on RMS view so the
+            // operator can try another station.
+            if (wasConnected) emit done();
+        });
+    // Belt-and-suspenders: always re-enable the Connect button when the
+    // dialog closes (including X-out before sessionDone has fired).
+    QObject::connect(console, &QDialog::finished, this, [this](int) {
         m_connectBtn->setEnabled(true);
-        emit done();
     });
     console->show();
 }

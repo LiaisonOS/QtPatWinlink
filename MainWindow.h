@@ -43,9 +43,14 @@ private:
     void setActiveTab(QPushButton *btn);
     void setStatusIdle(const QString &text, const QString &color = "#888888");
     void setStatusActivity(const QString &text);
+    void handoffToBrowser();
+    bool notifySupervisorIgnoreExit();
+    bool launchBrowser(const QString &url);
 
     PatClient      *m_client;
     bool            m_touchMode;
+    QString         m_band;
+    QString         m_modem;
 
     QStackedWidget *m_stack;
     QLabel         *m_statusLabel;

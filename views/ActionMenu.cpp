@@ -27,15 +27,17 @@ ActionMenu::ActionMenu(bool touchMode, QWidget *parent)
     addSeparator();
     auto *actPosition      = addAction("Send Position Report");
     auto *actFormsUpdate   = addAction("Update Form Templates");
+    auto *actOpenBrowser   = addAction("Open in Browser");
     addSeparator();
     auto *actAbout         = addAction("About");
     addSeparator();
     auto *actClose         = addAction("Close");
 
-    QObject::connect(actConnect,     &QAction::triggered, this, &ActionMenu::connectRequested);
-    QObject::connect(actCompose,     &QAction::triggered, this, &ActionMenu::composeRequested);
-    QObject::connect(actPosition,    &QAction::triggered, this, &ActionMenu::positionRequested);
-    QObject::connect(actFormsUpdate, &QAction::triggered, this, &ActionMenu::formsUpdateRequested);
-    QObject::connect(actClose,       &QAction::triggered, this, &ActionMenu::closeRequested);
-    QObject::connect(actAbout,       &QAction::triggered, this, &ActionMenu::aboutRequested);
+    QObject::connect(actConnect,      &QAction::triggered, this, &ActionMenu::connectRequested);
+    QObject::connect(actCompose,      &QAction::triggered, this, &ActionMenu::composeRequested);
+    QObject::connect(actPosition,     &QAction::triggered, this, &ActionMenu::positionRequested);
+    QObject::connect(actFormsUpdate,  &QAction::triggered, this, &ActionMenu::formsUpdateRequested);
+    QObject::connect(actOpenBrowser,  &QAction::triggered, this, &ActionMenu::openInBrowserRequested);
+    QObject::connect(actClose,        &QAction::triggered, this, &ActionMenu::closeRequested);
+    QObject::connect(actAbout,        &QAction::triggered, this, &ActionMenu::aboutRequested);
 }
