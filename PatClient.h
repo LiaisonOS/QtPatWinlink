@@ -49,8 +49,10 @@ public:
 
     // WebSocket
     void connectWebSocket();
+    bool isWebSocketConnected() const;
 
 signals:
+    void wsConnectedNow();          // emitted from onWsConnected so headless callers can wait for WS
     void mailboxReady(const QString &box, const QJsonArray &messages);
     void messageReady(const QString &box, const QString &mid, const QJsonObject &message);
     void messageDeleted(const QString &box, const QString &mid);

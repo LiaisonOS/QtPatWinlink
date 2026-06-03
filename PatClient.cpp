@@ -282,6 +282,12 @@ void PatClient::onWsConnected()
     m_wsUrl = m_baseUrl;
     m_wsUrl.replace("http://", "ws://").replace("https://", "wss://");
     m_wsUrl += "/ws";
+    emit wsConnectedNow();
+}
+
+bool PatClient::isWebSocketConnected() const
+{
+    return m_ws && m_ws->state() == QAbstractSocket::ConnectedState;
 }
 
 void PatClient::onWsDisconnected()

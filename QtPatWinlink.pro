@@ -16,6 +16,8 @@ SOURCES += \
     MainWindow.cpp \
     PatClient.cpp \
     RmsPrefs.cpp \
+    MissionBroadcaster.cpp \
+    MissionRunner.cpp \
     views/InboxView.cpp \
     views/OutboxView.cpp \
     views/SentView.cpp \
@@ -34,6 +36,8 @@ HEADERS += \
     PatClient.h \
     RmsPrefs.h \
     TouchStyle.h \
+    MissionBroadcaster.h \
+    MissionRunner.h \
     views/InboxView.h \
     views/OutboxView.h \
     views/SentView.h \

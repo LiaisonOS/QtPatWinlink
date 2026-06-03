@@ -26,6 +26,7 @@ class MainWindow : public QMainWindow
 public:
     explicit MainWindow(const QString &patUrl, bool touchMode,
                         const QString &band = {}, const QString &modem = {},
+                        bool mailViewer = false,
                         QWidget *parent = nullptr);
 
 private slots:
@@ -49,6 +50,7 @@ private:
 
     PatClient      *m_client;
     bool            m_touchMode;
+    bool            m_mailViewer = false;  // true = read-only mailbox UI (no Connect)
     QString         m_band;
     QString         m_modem;
 
