@@ -24,14 +24,16 @@
 #include "views/PositionReportDialog.h"
 
 MainWindow::MainWindow(const QString &patUrl, bool touchMode,
-                       const QString &band, const QString &modem, QWidget *parent)
+                       const QString &band, const QString &modem,
+                       bool mailViewer, QWidget *parent)
     : QMainWindow(parent)
     , m_client(new PatClient(patUrl, this))
     , m_touchMode(touchMode)
+    , m_mailViewer(mailViewer)
     , m_band(band)
     , m_modem(modem)
 {
-    setWindowTitle("Pat Winlink — LiaisonOS");
+    setWindowTitle(mailViewer ? "Mail Viewer — LiaisonOS" : "Pat Winlink — LiaisonOS");
 
     if (touchMode)
         setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
@@ -55,7 +57,12 @@ MainWindow::MainWindow(const QString &patUrl, bool touchMode,
     QObject::connect(m_sent,   &SentView::composeRequested,    this, &MainWindow::showCompose);
     QObject::connect(m_archive,&ArchiveView::composeRequested, this, &MainWindow::showCompose);
     QObject::connect(m_actionMenu, &ActionMenu::composeRequested, this, [this]() { showCompose(); });
-    QObject::connect(m_actionMenu, &ActionMenu::connectRequested, this, &MainWindow::showConnect);
+    // In mail-viewer mode, the Connect action is a no-op — there's no VARA
+    // /modem chain running (we're alongside a presence mode like JS8/VarAC),
+    // so dialing would just fail. Operator uses this window strictly for
+    // reading / composing / archiving.
+    if (!m_mailViewer)
+        QObject::connect(m_actionMenu, &ActionMenu::connectRequested, this, &MainWindow::showConnect);
     QObject::connect(m_actionMenu, &ActionMenu::closeRequested,   this, &QWidget::close);
     QObject::connect(m_actionMenu, &ActionMenu::openInBrowserRequested,
                      this, &MainWindow::handoffToBrowser);
