@@ -61,6 +61,20 @@ void RmsPrefs::load()
     }
 
     m_favoritesOnly = root.value("favoritesOnly").toBool(false);
+
+    m_manual.clear();
+    for (const auto &v : root.value("manualStations").toArray()) {
+        QJsonObject o = v.toObject();
+        ManualStation s;
+        s.callsign = o.value("callsign").toString();
+        s.freq_hz  = o.value("freq_hz").toDouble();
+        s.bw_hz    = o.value("bw_hz").toInt(2300);
+        s.modem    = o.value("modem").toString();
+        s.band     = o.value("band").toString();
+        s.notes    = o.value("notes").toString();
+        if (!s.callsign.isEmpty() && s.freq_hz > 0.0)
+            m_manual.append(s);
+    }
 }
 
 void RmsPrefs::save() const
@@ -86,6 +100,19 @@ void RmsPrefs::save() const
     }
     root["favorites"] = favs;
     root["favoritesOnly"] = m_favoritesOnly;
+
+    QJsonArray man;
+    for (const ManualStation &s : m_manual) {
+        QJsonObject o;
+        o["callsign"] = s.callsign;
+        o["freq_hz"]  = s.freq_hz;
+        o["bw_hz"]    = s.bw_hz;
+        o["modem"]    = s.modem;
+        o["band"]     = s.band;
+        o["notes"]    = s.notes;
+        man.append(o);
+    }
+    root["manualStations"] = man;
 
     QFile f(m_path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
@@ -123,5 +150,37 @@ void RmsPrefs::setFavoritesOnly(bool on)
 {
     if (m_favoritesOnly == on) return;
     m_favoritesOnly = on;
+    save();
+}
+
+void RmsPrefs::addOrUpdateManual(const ManualStation &s)
+{
+    if (s.callsign.trimmed().isEmpty() || s.freq_hz <= 0.0) return;
+    // Replace if same callsign+freq+modem — lets operator edit an entry
+    // just by re-submitting the dialog with the same key.
+    for (int i = 0; i < m_manual.size(); ++i) {
+        const auto &e = m_manual[i];
+        if (e.callsign.trimmed().toUpper() == s.callsign.trimmed().toUpper()
+            && qAbs(e.freq_hz - s.freq_hz) < 1.0
+            && e.modem == s.modem) {
+            m_manual[i] = s;
+            save();
+            return;
+        }
+    }
+    m_manual.append(s);
+    save();
+}
+
+void RmsPrefs::removeManual(const QString &callsign, double freq_hz, const QString &modem)
+{
+    for (int i = m_manual.size() - 1; i >= 0; --i) {
+        const auto &e = m_manual[i];
+        if (e.callsign.trimmed().toUpper() == callsign.trimmed().toUpper()
+            && qAbs(e.freq_hz - freq_hz) < 1.0
+            && e.modem == modem) {
+            m_manual.removeAt(i);
+        }
+    }
     save();
 }

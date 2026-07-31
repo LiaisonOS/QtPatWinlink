@@ -6,6 +6,7 @@
 
 #include "ConnectView.h"
 #include "../TouchStyle.h"
+#include "ManualRmsDialog.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -14,6 +15,7 @@
 #include <QScroller>
 #include <QMenu>
 #include <QAction>
+#include <QMessageBox>
 
 namespace {
 // Table item that sorts by numeric value while displaying custom text.
@@ -143,8 +145,16 @@ ConnectView::ConnectView(PatClient *client, bool touchMode, QWidget *parent)
         "QPushButton:hover { background: #444444; }"
         "QPushButton:disabled { background: #1a1a1a; color: #666666; }"
     ).arg(btnRadius).arg(touchExtra));
+    // Manual-entry button: for offline use (Winlink RMS list needs internet
+    // to refresh) or to reach an unlisted BBS.
+    m_manualBtn = new QPushButton("+ Manual");
+    m_manualBtn->setStyleSheet(QString(
+        "QPushButton { background: #2d2d2d; color: #e0e0e0; border: 1px solid #404040; border-radius: %1px; %2 }"
+        "QPushButton:hover { background: #444444; }"
+    ).arg(btnRadius).arg(touchExtra));
     filterRow->addWidget(m_applyBtn);
     filterRow->addWidget(m_refreshBtn);
+    filterRow->addWidget(m_manualBtn);
 
     m_table = new QTableWidget(0, 6, this);
     m_table->setHorizontalHeaderLabels({"Callsign", "Freq (MHz)", "Modem", "Dist (km)", "Quality %", "★"});
@@ -203,7 +213,28 @@ ConnectView::ConnectView(PatClient *client, bool touchMode, QWidget *parent)
     QObject::connect(m_cancelBtn,  &QPushButton::clicked, this, &ConnectView::done);
     QObject::connect(m_applyBtn,   &QPushButton::clicked, this, &ConnectView::applyFilters);
     QObject::connect(m_refreshBtn, &QPushButton::clicked, this, &ConnectView::forceRefresh);
+    QObject::connect(m_manualBtn,  &QPushButton::clicked, this, &ConnectView::openManualDialog);
     QObject::connect(m_searchFilter, &QLineEdit::textChanged, this, &ConnectView::onSearchChanged);
+
+    // Right-click context menu — Edit/Delete for manual rows. Detection uses
+    // the marker we set in reloadWithManualMerged() (Qt::UserRole+2 == true).
+    // Style must be applied explicitly — bare QMenu inherits Qt defaults
+    // and renders black-on-black on the dark palette.
+    m_table->setContextMenuPolicy(Qt::CustomContextMenu);
+    QObject::connect(m_table, &QTableWidget::customContextMenuRequested, this,
+        [this, filterMenuStyle](const QPoint &pos) {
+            int row = m_table->rowAt(pos.y());
+            if (row < 0) return;
+            auto *cs = m_table->item(row, 0);
+            if (!cs || !cs->data(Qt::UserRole + 2).toBool()) return;   // not manual
+            QMenu menu(this);
+            menu.setStyleSheet(filterMenuStyle);
+            QAction *edit = menu.addAction(tr("Edit"));
+            QAction *del  = menu.addAction(tr("Delete"));
+            QAction *sel  = menu.exec(m_table->viewport()->mapToGlobal(pos));
+            if (sel == edit) editManualStation(row);
+            else if (sel == del) deleteManualStation(row);
+        });
 
     m_connectBtn->setEnabled(false);
     QObject::connect(m_table, &QTableWidget::itemSelectionChanged, this, [this]() {
@@ -276,9 +307,144 @@ void ConnectView::forceRefresh()
 
 void ConnectView::onRmsListReady(const QJsonArray &stations)
 {
-    m_allStations = stations;
+    m_lastRmsFetch = stations;
     m_refreshBtn->setEnabled(true);
+    reloadWithManualMerged();
+}
+
+void ConnectView::reloadWithManualMerged()
+{
+    // Shape each manual entry into the same JSON object structure Pat
+    // returns for online RMS rows — that way onSearchChanged renders
+    // manual and online stations identically (filters, star, prediction
+    // column all just work). Manual rows also get an "__manual" flag we
+    // read back in the renderer to draw the "M" badge and tag the item
+    // for the right-click menu.
+    QJsonArray merged;
+    for (const auto &m : m_prefs.manualStations()) {
+        QJsonObject o;
+        o["callsign"] = m.callsign;
+        o["modes"]    = m.modem;
+        o["band"]     = m.band;
+        QJsonObject dial;
+        dial["hz"]   = QString::number(m.freq_hz, 'f', 0);
+        dial["desc"] = QString::number(m.freq_hz / 1e6, 'f', 4) + " MHz";
+        o["dial"]    = dial;
+        o["distance"]   = 0;
+        o["url"]        = ManualRmsDialog::buildConnectUrl(m);
+        o["prediction"] = QJsonValue::Null;
+        o["__manual"]   = true;                  // renderer marker
+        o["__notes"]    = m.notes;
+        merged.append(o);
+    }
+    // Manual first — cheap way to keep them near the top of the initial
+    // render before the numeric sort by quality kicks in. Once the user
+    // sorts by another column it doesn't matter.
+    for (const auto &v : m_lastRmsFetch) merged.append(v);
+    m_allStations = merged;
     onSearchChanged(m_searchFilter->text());
+}
+
+void ConnectView::openManualDialog()
+{
+    ManualRmsDialog dlg(m_touchMode, {}, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+    const auto entry = dlg.result();
+    m_prefs.addOrUpdateManual(entry);
+
+    // Drop filters that would hide the new row — user's clear intent is
+    // "connect to this station now", not "add it and let me hunt for it
+    // under the current filter". Filter buttons snap back to All.
+    bool filtersChanged = false;
+    if (!m_band.isEmpty() && m_band != entry.band) {
+        m_band.clear();
+        m_bandBtn->setText("Band: All    ▾");
+        filtersChanged = true;
+    }
+    if (!m_modem.isEmpty() && m_modem != entry.modem) {
+        m_modem.clear();
+        m_modemBtn->setText("Modem: All    ▾");
+        filtersChanged = true;
+    }
+    if (m_prefs.favoritesOnly()) {
+        m_prefs.setFavoritesOnly(false);
+        m_favOnlyBtn->setChecked(false);
+        filtersChanged = true;
+    }
+    if (!m_searchFilter->text().isEmpty()) {
+        m_searchFilter->clear();   // triggers onSearchChanged which reloads
+        filtersChanged = true;
+    }
+    // If filters didn't change (so no auto-reload), refresh manually. Note
+    // that clearing m_searchFilter above already reloads via textChanged.
+    if (!filtersChanged || m_searchFilter->text().isEmpty())
+        reloadWithManualMerged();
+
+    // Select + scroll to the new row so a single Connect tap sends it.
+    for (int r = 0; r < m_table->rowCount(); ++r) {
+        auto *cs = m_table->item(r, 0);
+        if (cs && cs->text().trimmed().toUpper() == entry.callsign.trimmed().toUpper()
+            && cs->data(Qt::UserRole + 2).toBool()) {
+            m_table->setCurrentCell(r, 0);
+            m_table->scrollToItem(cs, QAbstractItemView::PositionAtCenter);
+            m_connectBtn->setEnabled(true);
+            m_connectBtn->setFocus();
+            break;
+        }
+    }
+
+    m_statusLabel->setText(QString("Manual entry added: %1 — press Connect")
+                            .arg(entry.callsign));
+}
+
+void ConnectView::editManualStation(int row)
+{
+    auto *cs = m_table->item(row, 0);
+    if (!cs) return;
+    QString callsign = cs->text();
+    QString modem    = cs->data(Qt::UserRole + 1).toString();
+    // Freq stored on the freq item as its numeric value (hz)
+    auto *freqItem = m_table->item(row, 1);
+    if (!freqItem) return;
+    // NumItem stores hz as private m_val, but we also encoded it in the
+    // JSON we built — look it up by re-scanning m_prefs to find the match.
+    // Loose match on callsign+modem — freq comes from the prefs entry.
+    for (const auto &m : m_prefs.manualStations()) {
+        if (m.callsign.trimmed().toUpper() == callsign.trimmed().toUpper()
+            && m.modem == modem) {
+            ManualRmsDialog dlg(m_touchMode, m, this);
+            if (dlg.exec() != QDialog::Accepted) return;
+            // If key fields changed (freq/modem), remove old before add
+            const auto &n = dlg.result();
+            if (qAbs(n.freq_hz - m.freq_hz) >= 1.0 || n.modem != m.modem
+                || n.callsign.trimmed().toUpper() != m.callsign.trimmed().toUpper())
+                m_prefs.removeManual(m.callsign, m.freq_hz, m.modem);
+            m_prefs.addOrUpdateManual(n);
+            reloadWithManualMerged();
+            return;
+        }
+    }
+}
+
+void ConnectView::deleteManualStation(int row)
+{
+    auto *cs = m_table->item(row, 0);
+    if (!cs) return;
+    QString callsign = cs->text();
+    QString modem    = cs->data(Qt::UserRole + 1).toString();
+    auto ans = QMessageBox::question(this, tr("Delete manual station"),
+        tr("Remove manual entry \"%1\" on %2?").arg(callsign, modem));
+    if (ans != QMessageBox::Yes) return;
+    // Match callsign+modem — remove all freqs on that pair to avoid stragglers.
+    // Freq value collected from the prefs list to hit removeManual's exact key.
+    for (const auto &m : m_prefs.manualStations()) {
+        if (m.callsign.trimmed().toUpper() == callsign.trimmed().toUpper()
+            && m.modem == modem) {
+            m_prefs.removeManual(m.callsign, m.freq_hz, m.modem);
+            break;
+        }
+    }
+    reloadWithManualMerged();
 }
 
 void ConnectView::onSearchChanged(const QString &text)
@@ -323,9 +489,19 @@ void ConnectView::onSearchChanged(const QString &text)
             quality = s.value("prediction").toObject().value("link_quality").toInt(-1);
         QString qualStr = quality >= 0 ? QString::number(quality) + " %" : "";
 
+        const bool isManual = s.value("__manual").toBool(false);
+
         auto *callItem = new QTableWidgetItem(callsign);
         callItem->setData(Qt::UserRole,     s.value("url").toString());   // connect URL
         callItem->setData(Qt::UserRole + 1, s.value("modes").toString());
+        callItem->setData(Qt::UserRole + 2, isManual);                    // for right-click menu
+        if (isManual) {
+            const QString notes = s.value("__notes").toString();
+            callItem->setToolTip(notes.isEmpty()
+                ? tr("Manual entry — right-click to edit or delete.")
+                : tr("Manual entry — %1\n(right-click to edit or delete)").arg(notes));
+            callItem->setForeground(QColor("#ffa500"));   // subtle orange tint
+        }
 
         m_table->setItem(row, 0, callItem);
         m_table->setItem(row, 1, new NumItem(freqStr, hz));
@@ -339,9 +515,15 @@ void ConnectView::onSearchChanged(const QString &text)
         m_table->setItem(row, 4, qualItem);
 
         bool isFav = m_prefs.isFavorite(callsign, freqStr, s.value("modes").toString());
-        auto *starItem = new QTableWidgetItem(isFav ? "★" : "☆");
+        // Manual entries prefix their marker onto the star column so the
+        // operator can tell at a glance which rows came from the manual
+        // list vs the Winlink RMS download.
+        QString starText;
+        if (isManual) starText = isFav ? "M★" : "M";
+        else          starText = isFav ? "★"  : "☆";
+        auto *starItem = new QTableWidgetItem(starText);
         starItem->setTextAlignment(Qt::AlignCenter);
-        starItem->setForeground(QColor(isFav ? "#ffa500" : "#666666"));
+        starItem->setForeground(QColor(isFav ? "#ffa500" : (isManual ? "#ffa500" : "#666666")));
         m_table->setItem(row, 5, starItem);
     }
 
