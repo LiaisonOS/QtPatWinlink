@@ -30,7 +30,8 @@ public:
     void deleteMessage(const QString &box, const QString &mid);
     void markRead(const QString &box, const QString &mid);
     void postMessage(const QString &to, const QString &subject, const QString &body,
-                     const QString &cc = {}, const QStringList &attachments = {});
+                     const QString &cc = {}, const QStringList &attachments = {},
+                     bool p2pOnly = false);
 
     // Connect
     void fetchRmsList(const QString &band = {}, const QString &mode = {}, bool forceDownload = false);
@@ -47,6 +48,11 @@ public:
     void fetchFormCatalog();
     void fetchFormData();    // GET /api/form — retrieves the most recently submitted form body
 
+    // Config (for P2P Listen mode)
+    void fetchConfig();                              // GET /api/config → configReady
+    void updateConfigListen(const QStringList &modems); // PUT /api/config with new Listen[]
+    void reloadConfig();                             // POST /api/reload — no restart needed
+
     // WebSocket
     void connectWebSocket();
     bool isWebSocketConnected() const;
@@ -60,12 +66,25 @@ signals:
     void messagePostFailed(const QString &detail);
     void rmsListReady(const QJsonArray &stations);
     void statusReady(const QJsonObject &status);
+    // Fired when the /api/connect long-poll returns — i.e. Pat's session
+    // goroutine has fully finished and all received mail is written to disk.
+    // `error` is empty on a clean HTTP 200 finish, or carries the transport
+    // error string (Pat returns HTTP 500 even on clean termination). This is
+    // the authoritative end-of-session signal for headless missions.
+    void connectFinished(const QString &error);
     void positionReady(const QJsonObject &pos);
     void formTemplatesUpdated();
     void formCatalogReady(const QJsonObject &catalog);
     void formDataReady(const QString &to, const QString &cc,
                        const QString &subject, const QString &body);
     void wsEvent(const QJsonObject &event);
+    // Fired when Pat's WebSocket reports a mailbox directory change
+    // (Pat emits { "UpdateMailbox": true } from its fsnotify watcher).
+    // Debounced by Pat to ~100ms. Views should call their own refresh().
+    void mailboxUpdated();
+    void configReady(const QJsonObject &config);
+    void configUpdated();
+    void configReloaded();
     void error(const QString &message);
 
 private slots:

@@ -80,7 +80,8 @@ void PatClient::markRead(const QString &box, const QString &mid)
 }
 
 void PatClient::postMessage(const QString &to, const QString &subject, const QString &body,
-                             const QString &cc, const QStringList &attachments)
+                             const QString &cc, const QStringList &attachments,
+                             bool p2pOnly)
 {
     auto *multi = new QHttpMultiPart(QHttpMultiPart::FormDataType);
 
@@ -97,6 +98,10 @@ void PatClient::postMessage(const QString &to, const QString &subject, const QSt
     addPart("body", body);
     addPart("date", QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
     if (!cc.isEmpty()) addPart("cc", cc);
+    // Pat's api/mailbox.go: reads "p2ponly" form field, sets X-P2POnly
+    // header when non-empty. Message with that header is delivered only
+    // during peer-to-peer ARQ sessions, never over an RMS/CMS session.
+    if (p2pOnly) addPart("p2ponly", "true");
 
     // Attachments — Pat reads file parts with field name "files"
     for (const QString &path : attachments) {
@@ -156,15 +161,28 @@ void PatClient::fetchRmsList(const QString &band, const QString &mode, bool forc
 
 void PatClient::connect(const QString &connectUrl)
 {
-    // Pat expects GET /api/connect?url=<encoded connect URL>
-    // This call blocks on the server until the session is complete.
+    // Pat expects GET /api/connect?url=<encoded connect URL>. This is a
+    // BLOCKING long-poll: Pat does not return until its session goroutine has
+    // fully finished — including writing every received message to the inbox
+    // on disk. So this reply is the authoritative end-of-session signal, for
+    // both a clean finish (HTTP 200) and Pat's clean-termination HTTP 500.
+    // Headless missions key completion off connectFinished rather than sniffing
+    // the log for QRT/QSX, which a real WL2K mail session never emits.
     QString path = "/api/connect?url=" + QUrl::toPercentEncoding(connectUrl);
-    auto *reply = get(path);
-    handleReply(reply, [this](const QByteArray &) {
-        // Session finished — push a disconnected status so console closes cleanly
+    QNetworkReply *reply = get(path);
+    QObject::connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const bool netErr = (reply->error() != QNetworkReply::NoError);
+        const QString detail = netErr ? reply->errorString() : QString();
+        emit connectFinished(detail);
+        // Preserve existing interactive behaviour: surface a transport error to
+        // the dashboard exactly as handleReply used to (Pat's benign HTTP 500
+        // on clean termination already flowed through here before).
+        if (netErr) emit error(detail);
+        // Push a disconnected status so any open console closes cleanly.
         QJsonObject status;
-        status["connected"] = false;
-        status["dialing"]   = false;
+        status["connected"]   = false;
+        status["dialing"]     = false;
         status["remote_addr"] = QString();
         emit statusReady(status);
     });
@@ -174,6 +192,62 @@ void PatClient::disconnect()
 {
     auto *reply = post("/api/disconnect");
     handleReply(reply, [](const QByteArray &) {});
+}
+
+// ── Config (P2P Listen mode) ─────────────────────────────────────────────────
+
+void PatClient::fetchConfig()
+{
+    auto *reply = get("/api/config");
+    handleReply(reply, [this](const QByteArray &data) {
+        QJsonParseError err;
+        auto doc = QJsonDocument::fromJson(data, &err);
+        if (err.error != QJsonParseError::NoError) {
+            emit error("config parse error: " + err.errorString());
+            return;
+        }
+        emit configReady(doc.object());
+    });
+}
+
+void PatClient::updateConfigListen(const QStringList &modems)
+{
+    // Pat's /api/config PUT replaces the WHOLE config — but the config body
+    // is huge (radios, hamlib rigs, addresses, etc.) and getting it wrong
+    // could brick sensitive settings. Safer path: fetch current config,
+    // splice in only the new Listen[] array, PUT the modified object back.
+    // Chain: GET current → PUT with only Listen changed → POST /api/reload.
+    auto *getReply = get("/api/config");
+    handleReply(getReply, [this, modems](const QByteArray &data) {
+        QJsonParseError err;
+        auto doc = QJsonDocument::fromJson(data, &err);
+        if (err.error != QJsonParseError::NoError) {
+            emit error("config parse error: " + err.errorString());
+            return;
+        }
+        QJsonObject cfg = doc.object();
+        QJsonArray listenArr;
+        for (const QString &m : modems) listenArr.append(m);
+        cfg["listen"] = listenArr;
+
+        QByteArray body = QJsonDocument(cfg).toJson(QJsonDocument::Compact);
+        QNetworkRequest req(QUrl(m_baseUrl + "/api/config"));
+        req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+        auto *putReply = m_nam->put(req, body);
+        handleReply(putReply, [this](const QByteArray &) {
+            emit configUpdated();
+            // Pat's config change doesn't take effect until reload.
+            reloadConfig();
+        });
+    });
+}
+
+void PatClient::reloadConfig()
+{
+    auto *reply = post("/api/reload");
+    handleReply(reply, [this](const QByteArray &) {
+        emit configReloaded();
+    });
 }
 
 void PatClient::fetchStatus()
@@ -303,8 +377,14 @@ void PatClient::onWsTextMessageReceived(const QString &message)
 {
     QJsonParseError err;
     auto doc = QJsonDocument::fromJson(message.toUtf8(), &err);
-    if (err.error == QJsonParseError::NoError)
-        emit wsEvent(doc.object());
+    if (err.error != QJsonParseError::NoError) return;
+    const QJsonObject obj = doc.object();
+    emit wsEvent(obj);
+    // Fast-path the mailbox-change event so views don't have to peek
+    // at every wsEvent to notice new mail. Pat emits this on any
+    // fs change under inbox/outbox/sent/archive (debounced 100ms).
+    if (obj.value("UpdateMailbox").toBool(false))
+        emit mailboxUpdated();
 }
 
 void PatClient::onWsError(QAbstractSocket::SocketError)

@@ -30,7 +30,9 @@ SOURCES += \
     views/FormPickerDialog.cpp \
     views/FormRenderDialog.cpp \
     views/PositionReportDialog.cpp \
-    views/ManualRmsDialog.cpp
+    views/ManualRmsDialog.cpp \
+    views/P2PListenDialog.cpp \
+    views/PeerConnectDialog.cpp
 
 HEADERS += \
     MainWindow.h \
@@ -52,4 +54,6 @@ HEADERS += \
     views/FormPickerDialog.h \
     views/FormRenderDialog.h \
     views/PositionReportDialog.h \
-    views/ManualRmsDialog.h
+    views/ManualRmsDialog.h \
+    views/P2PListenDialog.h \
+    views/PeerConnectDialog.h

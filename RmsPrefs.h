@@ -10,6 +10,8 @@
 #include <QString>
 #include <QSet>
 #include <QList>
+#include <QJsonArray>
+#include <QDateTime>
 
 class RmsPrefs
 {
@@ -30,9 +32,10 @@ public:
         QString callsign;      // e.g. "VE2CJR-10"
         double  freq_hz = 0.0; // dial freq
         int     bw_hz   = 2300;
-        QString modem;         // "varahf" | "varafm" | "winmor" | "pactor" | "packet"
+        QString modem;         // "varahf" | "varafm" | "ardop" | "pactor" | "Packet 1200" | "Packet 9600"
         QString band;          // "40m" (derived at entry time, kept for filtering)
         QString notes;         // free text
+        bool    skip_qsy = false; // omit ?freq= so pat doesn't rigctl the radio
     };
 
     RmsPrefs();
@@ -54,6 +57,14 @@ public:
     const QList<ManualStation> &manualStations() const { return m_manual; }
     void addOrUpdateManual(const ManualStation &s);
     void removeManual(const QString &callsign, double freq_hz, const QString &modem);
+
+    // Cached RMS list — persisted to a separate file so that even when
+    // pat-http is down (mode not running, no internet) the operator can
+    // still view/filter the last-known station list and plan connections.
+    void       saveCachedRmsList(const QJsonArray &stations);
+    QJsonArray cachedRmsList() const;
+    QDateTime  cachedRmsListTimestamp() const;
+    bool       hasCachedRmsList() const;
 
 private:
     static QString keyFor(const QString &cs, const QString &freq, const QString &modem);

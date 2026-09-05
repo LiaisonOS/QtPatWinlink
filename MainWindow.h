@@ -10,6 +10,7 @@
 #include <QStackedWidget>
 #include <QPushButton>
 #include <QLabel>
+#include <QTimer>
 #include "PatClient.h"
 #include "views/InboxView.h"
 #include "views/OutboxView.h"
@@ -70,4 +71,11 @@ private:
     QPushButton    *m_btnSent;
     QPushButton    *m_btnArchive;
     QPushButton    *m_btnAction;
+
+    // Debounce coalescer for mailboxUpdated bursts during transfers.
+    // Pat's fsnotify fires many events per second while messages are
+    // being written to disk; without a debounce we hammer /api/mailbox
+    // and starve the connect endpoint. 800ms window catches burst,
+    // still feels instant to the operator.
+    QTimer         *m_refreshDebounce;
 };

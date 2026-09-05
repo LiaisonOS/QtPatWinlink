@@ -13,6 +13,7 @@
 #include <QPushButton>
 #include <QMessageBox>
 #include <QRegularExpression>
+#include <QCheckBox>
 
 ManualRmsDialog::ManualRmsDialog(bool touchMode,
                                   const RmsPrefs::ManualStation &initial,
@@ -57,12 +58,18 @@ ManualRmsDialog::ManualRmsDialog(bool touchMode,
     m_bwHz->setValue(initial.bw_hz > 0 ? initial.bw_hz : 2300);
 
     m_modem = new QComboBox(this);
-    // Order matters: most-common HF workflow first.
-    m_modem->addItems({"varahf", "varafm", "winmor", "pactor", "packet"});
+    // Order matters: most-common HF workflow first. "Packet 1200"/"Packet 9600"
+    // match how Winlink's RMS list labels packet stations. Both map to the
+    // ax25:// PAT scheme — the baud is a pat interface config concern.
+    m_modem->addItems({"varahf", "varafm", "ardop", "pactor",
+                       "Packet 1200", "Packet 9600"});
     if (!initial.modem.isEmpty()) {
         int idx = m_modem->findText(initial.modem);
         if (idx >= 0) m_modem->setCurrentIndex(idx);
     }
+
+    m_skipQsy = new QCheckBox(tr("Skip QSY (I'll tune the radio manually)"), this);
+    m_skipQsy->setChecked(initial.skip_qsy);
 
     m_notes = new QLineEdit(this);
     m_notes->setPlaceholderText("Optional — e.g. QC EMCOMM gateway");
@@ -75,6 +82,7 @@ ManualRmsDialog::ManualRmsDialog(bool touchMode,
         m_bwHz->setMinimumHeight(rowH);
         m_modem->setMinimumHeight(rowH);
         m_notes->setMinimumHeight(rowH);
+        m_skipQsy->setMinimumHeight(rowH);
     }
 
     auto *form = new QFormLayout();
@@ -84,10 +92,12 @@ ManualRmsDialog::ManualRmsDialog(bool touchMode,
     form->addRow(tr("Frequency*:"),   m_freqMhz);
     form->addRow(tr("Bandwidth:"),    m_bwHz);
     form->addRow(tr("Modem:"),        m_modem);
+    form->addRow(QString(),           m_skipQsy);
     form->addRow(tr("Notes:"),        m_notes);
 
     auto *hint = new QLabel(tr("Frequency is the DIAL freq. VARA HF default 2300 Hz; "
-                                "VARA FM 500 Hz; Packet uses the audio bandwidth."), this);
+                                "VARA FM 500 Hz; Packet uses the audio bandwidth. "
+                                "Tick \"Skip QSY\" when the radio has no CAT or when you tune it yourself."), this);
     hint->setWordWrap(true);
     hint->setStyleSheet("color: #888; font-size: 9pt;");
 
@@ -150,6 +160,7 @@ void ManualRmsDialog::onAccept()
     m_result.modem    = m_modem->currentText();
     m_result.band     = bandForFreqHz(m_result.freq_hz);
     m_result.notes    = m_notes->text().trimmed();
+    m_result.skip_qsy = m_skipQsy->isChecked();
     accept();
 }
 
@@ -175,12 +186,28 @@ QString ManualRmsDialog::bandForFreqHz(double freq_hz)
 
 QString ManualRmsDialog::buildConnectUrl(const RmsPrefs::ManualStation &s)
 {
+    // pat's URL scheme: "Packet 1200"/"Packet 9600" both use ax25:// — the
+    // baud is a pat interface config (which KISS TNC) concern, not part of
+    // the URL. VARA/ARDOP/PACTOR use the modem name verbatim.
+    QString scheme;
+    if (s.modem.startsWith("Packet", Qt::CaseInsensitive))
+        scheme = "ax25";
+    else
+        scheme = s.modem.isEmpty() ? "varahf" : s.modem.toLower();
+
     // pat expects the DIAL freq in kHz — see main.cpp:51 example. Keep 2
     // decimals so 7.10325 MHz round-trips as freq=7103.25 (not 7103); the
     // integer-truncated version silently lost 250 Hz.
+    //
+    // When skip_qsy is set, we omit ?freq= entirely so pat does not attempt
+    // to rigctl the radio — needed for HTs without CAT and for setups where
+    // the operator tunes by hand.
+    if (s.skip_qsy) {
+        return QString("%1:///%2").arg(scheme).arg(s.callsign);
+    }
     const double freq_khz = s.freq_hz / 1000.0;
     return QString("%1:///%2?freq=%3&bw=%4")
-        .arg(s.modem.isEmpty() ? "varahf" : s.modem)
+        .arg(scheme)
         .arg(s.callsign)
         .arg(QString::number(freq_khz, 'f', 2))
         .arg(s.bw_hz);

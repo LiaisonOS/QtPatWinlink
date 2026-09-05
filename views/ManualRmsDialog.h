@@ -13,6 +13,7 @@
 #include <QDoubleSpinBox>
 #include <QSpinBox>
 #include <QComboBox>
+#include <QCheckBox>
 #include "../RmsPrefs.h"
 
 class ManualRmsDialog : public QDialog
@@ -51,4 +52,5 @@ private:
     QSpinBox                *m_bwHz;
     QComboBox               *m_modem;
     QLineEdit               *m_notes;
+    QCheckBox               *m_skipQsy;
 };

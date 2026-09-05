@@ -23,21 +23,26 @@ ActionMenu::ActionMenu(bool touchMode, QWidget *parent)
     ).arg(fontSize).arg(padV).arg(padH).arg(itemMinH));
 
     auto *actConnect       = addAction("Connect to RMS");
+    auto *actP2PConnect    = addAction("Connect to Peer…");
     auto *actCompose       = addAction("Compose");
     addSeparator();
     auto *actPosition      = addAction("Send Position Report");
     auto *actFormsUpdate   = addAction("Update Form Templates");
     auto *actOpenBrowser   = addAction("Open in Browser");
     addSeparator();
+    auto *actP2PListen     = addAction("P2P Listen…");
+    addSeparator();
     auto *actAbout         = addAction("About");
     addSeparator();
     auto *actClose         = addAction("Close");
 
     QObject::connect(actConnect,      &QAction::triggered, this, &ActionMenu::connectRequested);
+    QObject::connect(actP2PConnect,   &QAction::triggered, this, &ActionMenu::p2pConnectRequested);
     QObject::connect(actCompose,      &QAction::triggered, this, &ActionMenu::composeRequested);
     QObject::connect(actPosition,     &QAction::triggered, this, &ActionMenu::positionRequested);
     QObject::connect(actFormsUpdate,  &QAction::triggered, this, &ActionMenu::formsUpdateRequested);
     QObject::connect(actOpenBrowser,  &QAction::triggered, this, &ActionMenu::openInBrowserRequested);
+    QObject::connect(actP2PListen,    &QAction::triggered, this, &ActionMenu::p2pListenRequested);
     QObject::connect(actClose,        &QAction::triggered, this, &ActionMenu::closeRequested);
     QObject::connect(actAbout,        &QAction::triggered, this, &ActionMenu::aboutRequested);
 }

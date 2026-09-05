@@ -44,8 +44,10 @@ signals:
 private slots:
     void onStatusReady(const QJsonObject &status);
     void onWsEvent(const QJsonObject &event);
+    void onConnectFinished(const QString &error);
     void onPatError(const QString &msg);
     void onTimeout();
+    void onGrace();
 
 private:
     void failMission(const QString &reason);
@@ -56,7 +58,10 @@ private:
     Params              m_p;
 
     QTimer             *m_timeout;
+    QTimer             *m_grace;          // backstop after link-down if the
+                                          // /api/connect reply is ever lost
     bool                m_sawConnected = false;
     bool                m_done = false;
     bool                m_receivedMail = false;
+    bool                m_graceArmed = false;
 };

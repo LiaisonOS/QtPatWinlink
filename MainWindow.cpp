@@ -22,6 +22,9 @@
 #include "views/FormPickerDialog.h"
 #include "views/FormRenderDialog.h"
 #include "views/PositionReportDialog.h"
+#include "views/P2PListenDialog.h"
+#include "views/PeerConnectDialog.h"
+#include "views/SessionConsole.h"
 
 MainWindow::MainWindow(const QString &patUrl, bool touchMode,
                        const QString &band, const QString &modem,
@@ -42,7 +45,7 @@ MainWindow::MainWindow(const QString &patUrl, bool touchMode,
     m_outbox  = new OutboxView(m_client, m_touchMode, this);
     m_sent    = new SentView(m_client, m_touchMode, this);
     m_archive = new ArchiveView(m_client, m_touchMode, this);
-    m_compose = new ComposeView(m_client, m_touchMode, this);
+    m_compose = new ComposeView(m_client, m_touchMode, m_modem, this);
     m_connect = new ConnectView(m_client, m_touchMode, this);
     m_actionMenu = new ActionMenu(m_touchMode, this);
 
@@ -79,6 +82,26 @@ MainWindow::MainWindow(const QString &patUrl, bool touchMode,
         setStatusActivity("●  Updating form templates...");
         m_client->updateFormTemplates();
     });
+    QObject::connect(m_actionMenu, &ActionMenu::p2pListenRequested, this, [this]() {
+        auto *dlg = new P2PListenDialog(m_client, m_touchMode, m_modem, this);
+        dlg->setAttribute(Qt::WA_DeleteOnClose);
+        dlg->show();
+    });
+    // In mail-viewer mode there's no modem chain running, same as the
+    // Connect-to-RMS branch above — a peer connect would just fail.
+    if (!m_mailViewer) {
+        QObject::connect(m_actionMenu, &ActionMenu::p2pConnectRequested, this, [this]() {
+            PeerConnectDialog dlg(m_modem, m_touchMode, this);
+            if (dlg.exec() != QDialog::Accepted) return;
+            QString url = dlg.connectUrl();
+            if (url.isEmpty()) return;
+            m_client->connect(url);
+            auto *console = new SessionConsole(m_client, m_touchMode, this);
+            console->setAttribute(Qt::WA_DeleteOnClose);
+            console->setConnectUrl(url);
+            console->show();
+        });
+    }
     QObject::connect(m_client, &PatClient::formTemplatesUpdated, this, [this]() {
         setStatusActivity("●  Form templates updated");
         QTimer::singleShot(3000, this, [this]() { setStatusIdle("●  Idle"); });
@@ -144,6 +167,29 @@ MainWindow::MainWindow(const QString &patUrl, bool touchMode,
     auto *timer = new QTimer(this);
     QObject::connect(timer, &QTimer::timeout, m_client, &PatClient::fetchStatus);
     timer->start(5000);
+
+    // Debounced mailbox-changed handler. Pat's fsnotify emits an
+    // UpdateMailbox event per file write; a Winlink transfer with 10
+    // messages generates ~30 events over a few seconds. Without a
+    // debounce, each event fires a fetch on all 4 views (or even one)
+    // and hammers Pat's HTTP threadpool, starving /api/connect and
+    // making the app look frozen. Instead: (re)start an 800ms timer
+    // on every UpdateMailbox, and when it finally fires (silence),
+    // refresh ONLY the currently-visible mailbox view. Single fetch,
+    // still feels instant, no burst.
+    m_refreshDebounce = new QTimer(this);
+    m_refreshDebounce->setSingleShot(true);
+    m_refreshDebounce->setInterval(800);
+    QObject::connect(m_client, &PatClient::mailboxUpdated, m_refreshDebounce,
+                     QOverload<>::of(&QTimer::start));
+    QObject::connect(m_refreshDebounce, &QTimer::timeout, this, [this]() {
+        QWidget *cur = m_stack->currentWidget();
+        if      (cur == m_inbox)   m_inbox->refresh();
+        else if (cur == m_outbox)  m_outbox->refresh();
+        else if (cur == m_sent)    m_sent->refresh();
+        else if (cur == m_archive) m_archive->refresh();
+        // Compose / Connect not currently visible → skip
+    });
 
     showInbox();
 }
@@ -303,6 +349,10 @@ void MainWindow::showCompose(const QString &to, const QString &subject, const QS
 {
     setActiveTab(nullptr);
     m_compose->prefill(to, subject, body);
+    // Ask Pat for current listen state so the P2P Only checkbox default
+    // matches "am I in P2P listen mode right now?" — catches the case
+    // where operator just toggled listen mode in the P2P Listen dialog.
+    m_compose->refreshP2PDefault();
     m_stack->setCurrentWidget(m_compose);
 }
 

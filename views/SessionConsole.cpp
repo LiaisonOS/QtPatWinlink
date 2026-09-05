@@ -63,6 +63,23 @@ SessionConsole::SessionConsole(PatClient *client, bool touchMode, QWidget *paren
     m_console->setMaximumBlockCount(2000);
     m_console->setMaximumHeight(touchMode ? 150 : 110);
 
+    // ── QSY-fail banner + retry button (hidden until PAT log shows hamlib error) ─
+    m_qsyErrorBanner = new QLabel(
+        "⚠ QSY failed — radio isn't responding to CAT. If you've already tuned "
+        "the radio to the RMS frequency, click Skip QSY & Retry to reconnect "
+        "without asking hamlib to change the frequency.");
+    m_qsyErrorBanner->setWordWrap(true);
+    m_qsyErrorBanner->setStyleSheet(
+        "background: #4a1a1a; color: #ffb0b0; border: 1px solid #7a2a2a;"
+        "border-radius: 4px; padding: 6px 10px; font-weight: bold;");
+    m_qsyErrorBanner->setVisible(false);
+
+    m_retryNoQsyBtn = new QPushButton("Skip QSY && Retry");
+    m_retryNoQsyBtn->setStyleSheet(
+        "background: #ffa500; color: #000000; font-weight: bold;"
+        "border: none; border-radius: 6px; padding: 6px 18px;");
+    m_retryNoQsyBtn->setVisible(false);
+
     // ── Buttons ────────────────────────────────────────────────────────────────
     m_disconnectBtn = new QPushButton("Disconnect");
     m_closeBtn      = new QPushButton("Close");
@@ -81,6 +98,7 @@ SessionConsole::SessionConsole(PatClient *client, bool touchMode, QWidget *paren
     }
 
     auto *btnRow = new QHBoxLayout();
+    btnRow->addWidget(m_retryNoQsyBtn);
     btnRow->addStretch();
     btnRow->addWidget(m_disconnectBtn);
     btnRow->addWidget(m_closeBtn);
@@ -90,6 +108,7 @@ SessionConsole::SessionConsole(PatClient *client, bool touchMode, QWidget *paren
     layout->setContentsMargins(16, 14, 16, 14);
     layout->setSpacing(10);
     layout->addLayout(statusRow);
+    layout->addWidget(m_qsyErrorBanner);
     layout->addWidget(m_progressBar);
     layout->addWidget(m_console);
     layout->addLayout(btnRow);
@@ -106,6 +125,14 @@ SessionConsole::SessionConsole(PatClient *client, bool touchMode, QWidget *paren
 
     QObject::connect(m_disconnectBtn, &QPushButton::clicked, this, &SessionConsole::onDisconnectClicked);
     QObject::connect(m_closeBtn,      &QPushButton::clicked, this, &QWidget::close);
+    QObject::connect(m_retryNoQsyBtn, &QPushButton::clicked, this, [this]() {
+        // Tell PAT to stop the current attempt (idempotent — no harm if
+        // it already aborted on its own), then hand the URL back up to
+        // ConnectView so it can strip ?freq= and reconnect.
+        m_client->disconnect();
+        emit retryWithoutQsy(m_originalUrl);
+        reject();  // close this session dialog; ConnectView opens a fresh one
+    });
     QObject::connect(m_client, &PatClient::wsEvent,    this, &SessionConsole::onWsEvent);
     QObject::connect(m_client, &PatClient::statusReady, this, [this](const QJsonObject &s) {
         updateStatus(s);
@@ -138,6 +165,31 @@ void SessionConsole::onWsEvent(const QJsonObject &event)
 void SessionConsole::appendLog(const QString &line)
 {
     if (line.isEmpty()) return;
+
+    // QSY-failure detection — if PAT's log stream shows a hamlib/rigctl
+    // failure at any point AND we have the original connect URL AND the
+    // URL has a ?freq= parameter to strip, expose the "Skip QSY & Retry"
+    // button. One-shot: don't keep re-showing on repeated log lines.
+    if (!m_qsyFailDetected
+        && !m_originalUrl.isEmpty()
+        && m_originalUrl.contains("freq=")) {
+        const QString lower = line.toLower();
+        const bool qsyErr =
+               (lower.contains("hamlib") && (lower.contains("error")
+                                          || lower.contains("fail")
+                                          || lower.contains("refused")
+                                          || lower.contains("cannot")
+                                          || lower.contains("could not")
+                                          || lower.contains("unable")))
+            || lower.contains("unable to set frequency")
+            || lower.contains("could not set frequency")
+            || lower.contains("rigctl: error");
+        if (qsyErr) {
+            m_qsyFailDetected = true;
+            m_qsyErrorBanner->setVisible(true);
+            m_retryNoQsyBtn->setVisible(true);
+        }
+    }
 
     if (line == m_lastLine) {
         ++m_repeatCount;

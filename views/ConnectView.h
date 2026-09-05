@@ -29,6 +29,7 @@ signals:
 
 private slots:
     void onRmsListReady(const QJsonArray &stations);
+    void onPatError(const QString &message);
     void onConnectClicked();
     void applyFilters();
     void forceRefresh();
@@ -66,4 +67,5 @@ private:
 
     QString       m_band;     // empty = all bands
     QString       m_modem;    // empty = all modems
+    bool          m_offline = false; // true while PatClient::error was last event
 };

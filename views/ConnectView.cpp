@@ -48,7 +48,8 @@ ConnectView::ConnectView(PatClient *client, bool touchMode, QWidget *parent)
 
     QStringList bands  = {"All Bands", "160m", "80m", "60m", "40m", "30m",
                           "20m", "17m", "15m", "12m", "10m", "6m", "2m", "70cm"};
-    QStringList modems = {"All Modems", "varahf", "varafm", "winmor", "pactor", "packet"};
+    QStringList modems = {"All Modems", "varahf", "varafm", "ardop", "pactor",
+                          "Packet 1200", "Packet 9600"};
 
     QString filterBtnStyle = QString(
         "QPushButton { background: #1e1e1e; color: #e0e0e0; border: 1px solid #404040;"
@@ -209,6 +210,7 @@ ConnectView::ConnectView(PatClient *client, bool touchMode, QWidget *parent)
     layout->addLayout(btnRow);
 
     QObject::connect(m_client, &PatClient::rmsListReady, this, &ConnectView::onRmsListReady);
+    QObject::connect(m_client, &PatClient::error,        this, &ConnectView::onPatError);
     QObject::connect(m_connectBtn, &QPushButton::clicked, this, &ConnectView::onConnectClicked);
     QObject::connect(m_cancelBtn,  &QPushButton::clicked, this, &ConnectView::done);
     QObject::connect(m_applyBtn,   &QPushButton::clicked, this, &ConnectView::applyFilters);
@@ -239,7 +241,11 @@ ConnectView::ConnectView(PatClient *client, bool touchMode, QWidget *parent)
     m_connectBtn->setEnabled(false);
     QObject::connect(m_table, &QTableWidget::itemSelectionChanged, this, [this]() {
         int row = m_table->currentRow();
-        m_connectBtn->setEnabled(row >= 0);
+        // Connect only enables when a row IS selected AND we're not in
+        // the offline (pat-http-down) state. Offline blocks new sessions
+        // but still lets the operator browse/edit — that's the whole
+        // point of the offline mode.
+        m_connectBtn->setEnabled(row >= 0 && !m_offline);
         if (row < 0) return;
         auto *cs    = m_table->item(row, 0);
         auto *freq  = m_table->item(row, 1);
@@ -272,6 +278,21 @@ ConnectView::ConnectView(PatClient *client, bool touchMode, QWidget *parent)
     if (touchMode) {
         m_table->setSelectionMode(QAbstractItemView::SingleSelection);
         QScroller::grabGesture(m_table->viewport(), QScroller::LeftMouseButtonGesture);
+    }
+
+    // Populate immediately from the on-disk cache so the operator sees
+    // stations right away — even if pat-http isn't running yet. A live
+    // fetch will overlay this once applyFilters() succeeds.
+    if (m_prefs.hasCachedRmsList()) {
+        m_lastRmsFetch = m_prefs.cachedRmsList();
+        reloadWithManualMerged();
+        m_statusLabel->setText(
+            "Cached list from " +
+            m_prefs.cachedRmsListTimestamp().toString("yyyy-MM-dd HH:mm"));
+    } else {
+        // No cache yet — manual entries still render, thanks to
+        // reloadWithManualMerged() being manual-first.
+        reloadWithManualMerged();
     }
 }
 
@@ -309,7 +330,26 @@ void ConnectView::onRmsListReady(const QJsonArray &stations)
 {
     m_lastRmsFetch = stations;
     m_refreshBtn->setEnabled(true);
+    // We got a live response — clear the offline state and persist so a
+    // future cold start (no pat-http yet) still shows something useful.
+    m_offline = false;
+    m_connectBtn->setEnabled(m_table->currentRow() >= 0);
+    m_prefs.saveCachedRmsList(stations);
     reloadWithManualMerged();
+    m_statusLabel->setText(QString("Live — %1 stations").arg(stations.size()));
+}
+
+void ConnectView::onPatError(const QString &message)
+{
+    // Any PatClient network error while we were expecting a response
+    // (typically /api/rmslist against a down pat-http). Fall back to the
+    // cached list + manual entries silently — no banner. The operator knows
+    // when they're off-grid; they keep the ability to view, filter and edit
+    // manual entries. Connect is gated by m_offline elsewhere.
+    m_offline = true;
+    m_refreshBtn->setEnabled(true);
+    m_connectBtn->setEnabled(false);
+    m_statusLabel->setText("Using saved list");
 }
 
 void ConnectView::reloadWithManualMerged()
@@ -387,7 +427,7 @@ void ConnectView::openManualDialog()
             && cs->data(Qt::UserRole + 2).toBool()) {
             m_table->setCurrentCell(r, 0);
             m_table->scrollToItem(cs, QAbstractItemView::PositionAtCenter);
-            m_connectBtn->setEnabled(true);
+            m_connectBtn->setEnabled(!m_offline);
             m_connectBtn->setFocus();
             break;
         }
@@ -573,18 +613,45 @@ void ConnectView::onConnectClicked()
     // Open session console — it subscribes to WS events and shows live protocol exchange
     auto *console = new SessionConsole(m_client, m_touchMode, this->parentWidget());
     console->setAttribute(Qt::WA_DeleteOnClose);
+    console->setConnectUrl(connectUrl);
     QObject::connect(console, &SessionConsole::sessionDone, this,
         [this](bool wasConnected) {
-            m_connectBtn->setEnabled(true);
+            m_connectBtn->setEnabled(!m_offline);
             // Only navigate away (to Inbox) if a connection was actually
             // established. On failed connects, stay on RMS view so the
             // operator can try another station.
             if (wasConnected) emit done();
         });
+    QObject::connect(console, &SessionConsole::retryWithoutQsy, this,
+        [this](const QString &originalUrl) {
+            // Strip ?freq=… and &bw=… so PAT doesn't try to rigctl the
+            // radio again. QUrlQuery would be cleaner but pat's URLs are
+            // triple-slash schemes (varahf:///CALL?…) that QUrl parses
+            // oddly, so we do it by hand — locate the '?' and drop the
+            // whole query string. bw isn't needed without freq anyway
+            // (PAT falls back to the modem's configured default).
+            QString stripped = originalUrl;
+            int q = stripped.indexOf('?');
+            if (q >= 0) stripped.truncate(q);
+            m_connectBtn->setEnabled(false);
+            m_client->connect(stripped);
+            auto *retry = new SessionConsole(m_client, m_touchMode, this->parentWidget());
+            retry->setAttribute(Qt::WA_DeleteOnClose);
+            retry->setConnectUrl(stripped);  // no freq= now, so no re-loop
+            QObject::connect(retry, &SessionConsole::sessionDone, this,
+                [this](bool wasConnected) {
+                    m_connectBtn->setEnabled(!m_offline);
+                    if (wasConnected) emit done();
+                });
+            QObject::connect(retry, &QDialog::finished, this, [this](int) {
+                m_connectBtn->setEnabled(!m_offline);
+            });
+            retry->show();
+        });
     // Belt-and-suspenders: always re-enable the Connect button when the
     // dialog closes (including X-out before sessionDone has fired).
     QObject::connect(console, &QDialog::finished, this, [this](int) {
-        m_connectBtn->setEnabled(true);
+        m_connectBtn->setEnabled(!m_offline);
     });
     console->show();
 }

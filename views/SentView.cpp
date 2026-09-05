@@ -105,7 +105,10 @@ void SentView::onMailboxReady(const QString &box, const QJsonArray &messages)
         QJsonObject msg = val.toObject();
         int row = m_table->rowCount();
         m_table->insertRow(row);
-        auto *subjectItem = new QTableWidgetItem(msg.value("Subject").toString());
+        QString subjectText = msg.value("Subject").toString();
+        if (msg.value("P2POnly").toBool(false))
+            subjectText = QStringLiteral("🔒 ") + subjectText;
+        auto *subjectItem = new QTableWidgetItem(subjectText);
         subjectItem->setData(Qt::UserRole,     msg.value("MID").toString());
         subjectItem->setData(Qt::UserRole + 1, msg);
         QString to = msg.value("To").toArray().first().toObject().value("Addr").toString();

@@ -22,14 +22,24 @@ MissionRunner::MissionRunner(PatClient *pat,
     , m_bcast(bcast)
     , m_p(p)
     , m_timeout(new QTimer(this))
+    , m_grace(new QTimer(this))
 {
     m_timeout->setSingleShot(true);
     m_timeout->setInterval(m_p.timeoutMin * 60 * 1000);
     connect(m_timeout, &QTimer::timeout, this, &MissionRunner::onTimeout);
 
-    connect(m_pat, &PatClient::statusReady, this, &MissionRunner::onStatusReady);
-    connect(m_pat, &PatClient::wsEvent,     this, &MissionRunner::onWsEvent);
-    connect(m_pat, &PatClient::error,       this, &MissionRunner::onPatError);
+    // Backstop: once the link goes down we normally complete on the
+    // /api/connect long-poll return. If that HTTP reply is ever lost, this
+    // fires a few seconds later so the mission finalizes instead of hanging
+    // to the hard timeout. By then any received mail is long since on disk.
+    m_grace->setSingleShot(true);
+    m_grace->setInterval(8 * 1000);
+    connect(m_grace, &QTimer::timeout, this, &MissionRunner::onGrace);
+
+    connect(m_pat, &PatClient::statusReady,     this, &MissionRunner::onStatusReady);
+    connect(m_pat, &PatClient::wsEvent,         this, &MissionRunner::onWsEvent);
+    connect(m_pat, &PatClient::connectFinished, this, &MissionRunner::onConnectFinished);
+    connect(m_pat, &PatClient::error,           this, &MissionRunner::onPatError);
 }
 
 void MissionRunner::start()
@@ -110,26 +120,52 @@ void MissionRunner::onStatusReady(const QJsonObject &status)
         return;  // still trying — stay in Connecting
     }
 
-    // connected=false && dialing=false. If we previously saw connected=true,
-    // the session ended cleanly. Otherwise this is the pre-connect state.
-    if (m_sawConnected)
+    // connected=false && dialing=false after we'd gone active: the ARQ link
+    // has torn down. We do NOT complete off this WS status directly — it can
+    // fire while Pat is still flushing the last received-mail chunks to disk.
+    // The authoritative "session done, mail on disk" signal is the
+    // /api/connect long-poll returning (onConnectFinished), which normally
+    // lands moments after this. Arm a short grace timer as a backstop so the
+    // mission still finalizes if that HTTP reply is ever lost.
+    if (m_sawConnected && !m_graceArmed) {
+        m_graceArmed = true;
+        m_grace->start();
+        qInfo().noquote() << "[mission] link down — awaiting /api/connect return "
+                             "(grace backstop armed)";
+    }
+}
+
+void MissionRunner::onConnectFinished(const QString &error)
+{
+    if (m_done) return;
+    // Pat's /api/connect long-poll has returned — its session goroutine is
+    // fully finished and every received message is written to disk. This is
+    // the authoritative completion signal. `error` is non-empty for Pat's
+    // benign clean-termination HTTP 500 (or a real transport failure); once
+    // the link went active it's session-end either way. If we never saw the
+    // link go active, the session never really started → failure.
+    if (m_sawConnected) {
+        if (!error.isEmpty())
+            qInfo().noquote() << "[mission] /api/connect returned" << error
+                              << "after active session — treating as complete";
         completeMission();
+    } else {
+        failMission(error.isEmpty()
+            ? QString("session ended before the link went active")
+            : error);
+    }
 }
 
 void MissionRunner::onPatError(const QString &msg)
 {
     if (m_done) return;
-    // Pat returns HTTP 500 on the long-poll /api/connect even on clean
-    // session termination. If we already saw the session go active
-    // (connected=true via WS Status), this is a benign session-end signal
-    // — not a real failure. Treat it as Complete.
-    if (m_sawConnected) {
-        qInfo().noquote() << "[mission] Pat returned" << msg
-                          << "after active session — treating as complete";
-        completeMission();
-        return;
-    }
-    failMission(msg);
+    // Non-fatal. Transient PatClient errors — WS blips that auto-reconnect, or
+    // Pat's benign clean-termination HTTP 500 (also surfaced here) — must not
+    // kill a mission. The authoritative end/failure comes from
+    // onConnectFinished; a genuinely hung session is caught by the hard
+    // timeout. Just log and broadcast for operator visibility.
+    qInfo().noquote() << "[mission] pat error (non-fatal):" << msg;
+    m_bcast->emitLog("pat-error", msg);
 }
 
 void MissionRunner::onTimeout()
@@ -139,10 +175,21 @@ void MissionRunner::onTimeout()
     if (m_pat) m_pat->disconnect();
 }
 
+void MissionRunner::onGrace()
+{
+    if (m_done) return;
+    // Link went down but the /api/connect reply never arrived. Received mail
+    // is on disk well within this grace window, so finalize as complete.
+    qInfo().noquote() << "[mission] grace elapsed after link-down "
+                         "(no /api/connect return) — completing";
+    completeMission();
+}
+
 void MissionRunner::completeMission()
 {
     m_done = true;
     m_timeout->stop();
+    m_grace->stop();
     QString lbl = m_p.rms.isEmpty() ? QString("session") : m_p.rms;
     QString detail = QString("session ended (%1)").arg(lbl);
     if (m_receivedMail) detail += " — new mail";
@@ -156,6 +203,7 @@ void MissionRunner::failMission(const QString &reason)
 {
     m_done = true;
     m_timeout->stop();
+    m_grace->stop();
     m_bcast->emitState(MissionBroadcaster::State::Failed, reason);
     qWarning().noquote() << "[mission] failed:" << reason;
     emit finished(1);

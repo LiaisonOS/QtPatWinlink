@@ -88,7 +88,14 @@ void InboxView::onMailboxReady(const QString &box, const QJsonArray &messages)
         m_table->insertRow(row);
 
         auto *fromItem    = new QTableWidgetItem(msg.value("From").toObject().value("Addr").toString());
-        auto *subjectItem = new QTableWidgetItem(msg.value("Subject").toString());
+        // Pat's mailbox JSON sets P2POnly=true on messages routed via a
+        // peer-to-peer session (X-P2POnly header). Prefix a 🔒 so the
+        // operator can distinguish P2P traffic from CMS-routed at a
+        // glance without opening the message.
+        QString subjectText = msg.value("Subject").toString();
+        if (msg.value("P2POnly").toBool(false))
+            subjectText = QStringLiteral("🔒 ") + subjectText;
+        auto *subjectItem = new QTableWidgetItem(subjectText);
         auto *dateItem    = new QTableWidgetItem(msg.value("Date").toString().left(16).replace("T", " "));
         QString mid = msg.value("MID").toString();
         auto *midItem = new QTableWidgetItem(mid);

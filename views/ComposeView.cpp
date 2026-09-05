@@ -9,14 +9,26 @@
 #include <QHBoxLayout>
 #include <QFormLayout>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QMessageBox>
 #include <QFileDialog>
 #include <QFileInfo>
 
-ComposeView::ComposeView(PatClient *client, bool touchMode, QWidget *parent)
+// Map the QtPatWinlink --modem CLI value ("varahf", "packet", …) to Pat's
+// canonical listen key ("varahf", "ax25", …). Same table as P2PListenDialog.
+static QString modemToListenKey(const QString &raw)
+{
+    const QString low = raw.trimmed().toLower();
+    if (low == "packet") return "ax25";
+    return low;    // varahf, varafm, ardop, ax25, pactor pass through
+}
+
+ComposeView::ComposeView(PatClient *client, bool touchMode,
+                         const QString &activeModem, QWidget *parent)
     : QWidget(parent)
     , m_client(client)
     , m_touchMode(touchMode)
+    , m_modem(modemToListenKey(activeModem))
 {
     int fontSize  = touchMode ? 16 : 10;
     int fieldMinH = touchMode ? 44 : 0;
@@ -73,6 +85,16 @@ ComposeView::ComposeView(PatClient *client, bool touchMode, QWidget *parent)
     m_cancelBtn = new QPushButton("Cancel");
     m_cancelBtn->setObjectName("cancel");
 
+    // P2P Only checkbox — when ticked, Pat sets X-P2POnly on the outbound
+    // message. That message will ONLY be transferred during a peer-to-peer
+    // ARQ session with the target callsign; it will never be uploaded to
+    // Winlink CMS on a normal RMS check-in. Requires the recipient to be
+    // running Pat in listen mode (see burger menu → P2P Listen…).
+    m_p2pOnly = new QCheckBox("P2P Only  (peer-to-peer, never via RMS)");
+    m_p2pOnly->setStyleSheet(
+        "QCheckBox { color: #e0e0e0; padding: 4px 0; }"
+        "QCheckBox::indicator { width: 18px; height: 18px; }");
+
     setStyleSheet(fieldStyle + btnStyle);
 
     auto *form = new QFormLayout();
@@ -86,6 +108,7 @@ ComposeView::ComposeView(PatClient *client, bool touchMode, QWidget *parent)
     attachRow->addStretch();
 
     auto *btnRow = new QHBoxLayout();
+    btnRow->addWidget(m_p2pOnly);
     btnRow->addStretch();
     btnRow->addWidget(m_cancelBtn);
     btnRow->addWidget(m_sendBtn);
@@ -99,6 +122,7 @@ ComposeView::ComposeView(PatClient *client, bool touchMode, QWidget *parent)
     layout->addWidget(m_bodyField);
     layout->addLayout(btnRow);
 
+    QObject::connect(m_client, &PatClient::configReady, this, &ComposeView::onConfigReady);
     QObject::connect(m_sendBtn,   &QPushButton::clicked, this, &ComposeView::onSend);
     QObject::connect(m_cancelBtn, &QPushButton::clicked, this, &ComposeView::done);
     QObject::connect(m_attachBtn, &QPushButton::clicked, this, &ComposeView::onAttachClicked);
@@ -141,7 +165,8 @@ void ComposeView::onSend()
         m_subjectField->text().trimmed(),
         m_bodyField->toPlainText(),
         QString(),
-        m_attachments
+        m_attachments,
+        m_p2pOnly->isChecked()
     );
 }
 
@@ -155,6 +180,7 @@ void ComposeView::onPosted()
     m_bodyField->clear();
     m_attachments.clear();
     refreshAttachmentList();
+    m_p2pOnly->setChecked(false);  // don't leak P2P-Only into the next message
 
     emit done();
 }
@@ -204,4 +230,32 @@ void ComposeView::refreshAttachmentList()
         m_attachList->addItem(it);
     }
     m_attachList->setVisible(!m_attachments.isEmpty());
+}
+
+void ComposeView::refreshP2PDefault()
+{
+    // Kick off a fetch; onConfigReady flips the checkbox to match.
+    // Skip if we don't know our modem (e.g. mail-viewer mode) — leave
+    // the checkbox at whatever the operator last set.
+    if (m_modem.isEmpty()) return;
+    m_client->fetchConfig();
+}
+
+void ComposeView::onConfigReady(const QJsonObject &config)
+{
+    // Only touch the checkbox default if the operator hasn't started
+    // filling in a message yet (empty To + Subject + Body). Rewriting
+    // the checkbox mid-compose would be jarring.
+    if (m_modem.isEmpty()) return;
+    if (m_sending) return;
+    if (!m_toField->text().trimmed().isEmpty()) return;
+    if (!m_subjectField->text().trimmed().isEmpty()) return;
+    if (!m_bodyField->toPlainText().trimmed().isEmpty()) return;
+
+    const QJsonArray listen = config.value("listen").toArray();
+    bool listeningHere = false;
+    for (const auto &v : listen) {
+        if (v.toString().toLower() == m_modem) { listeningHere = true; break; }
+    }
+    m_p2pOnly->setChecked(listeningHere);
 }

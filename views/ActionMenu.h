@@ -21,6 +21,8 @@ signals:
     void positionRequested();
     void formsUpdateRequested();
     void openInBrowserRequested();
+    void p2pListenRequested();
+    void p2pConnectRequested();
     void aboutRequested();
     void closeRequested();
 };

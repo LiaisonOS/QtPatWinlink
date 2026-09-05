@@ -8,6 +8,7 @@
 #include <QStandardPaths>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -72,6 +73,10 @@ void RmsPrefs::load()
         s.modem    = o.value("modem").toString();
         s.band     = o.value("band").toString();
         s.notes    = o.value("notes").toString();
+        s.skip_qsy = o.value("skip_qsy").toBool(false);
+        // One-shot migration: legacy "packet" (no baud) → "Packet 1200"
+        // matching how Winlink's RMS list labels packet stations.
+        if (s.modem == "packet") s.modem = "Packet 1200";
         if (!s.callsign.isEmpty() && s.freq_hz > 0.0)
             m_manual.append(s);
     }
@@ -110,6 +115,7 @@ void RmsPrefs::save() const
         o["modem"]    = s.modem;
         o["band"]     = s.band;
         o["notes"]    = s.notes;
+        o["skip_qsy"] = s.skip_qsy;
         man.append(o);
     }
     root["manualStations"] = man;
@@ -183,4 +189,55 @@ void RmsPrefs::removeManual(const QString &callsign, double freq_hz, const QStri
         }
     }
     save();
+}
+
+// ── Cached RMS list ──────────────────────────────────────────────────────────
+//
+// Written to a sibling file (rms-cache.json) rather than the main prefs
+// blob so it doesn't bloat the config file. Structure:
+//   { "timestamp": "2026-08-10T14:30:00", "stations": [ … ] }
+//
+// Rationale: cache survives across app restarts and (crucially) is readable
+// even when pat-http isn't running — operator can browse and filter the RMS
+// list at the kitchen table with no radio hooked up.
+
+static QString cachePathFor(const QString &prefsPath)
+{
+    QFileInfo fi(prefsPath);
+    return fi.absoluteDir().filePath("rms-cache.json");
+}
+
+void RmsPrefs::saveCachedRmsList(const QJsonArray &stations)
+{
+    ensureDir();
+    QJsonObject root;
+    root["timestamp"] = QDateTime::currentDateTime().toString(Qt::ISODate);
+    root["stations"]  = stations;
+
+    QFile f(cachePathFor(m_path));
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
+    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    f.close();
+}
+
+QJsonArray RmsPrefs::cachedRmsList() const
+{
+    QFile f(cachePathFor(m_path));
+    if (!f.open(QIODevice::ReadOnly)) return {};
+    auto doc = QJsonDocument::fromJson(f.readAll());
+    return doc.object().value("stations").toArray();
+}
+
+QDateTime RmsPrefs::cachedRmsListTimestamp() const
+{
+    QFile f(cachePathFor(m_path));
+    if (!f.open(QIODevice::ReadOnly)) return {};
+    auto doc = QJsonDocument::fromJson(f.readAll());
+    return QDateTime::fromString(doc.object().value("timestamp").toString(),
+                                 Qt::ISODate);
+}
+
+bool RmsPrefs::hasCachedRmsList() const
+{
+    return QFile::exists(cachePathFor(m_path));
 }
